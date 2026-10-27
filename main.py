@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS actual_generation (
 
 
 def main() -> int:
+    # handling the edge case if the database does not get connected.
     if not DATABASE_URL or "USER:PASSWORD@HOST/DBNAME" in DATABASE_URL:
         print(
             "DATABASE_URL is missing or still has the example placeholder.\n"
@@ -43,6 +44,7 @@ def main() -> int:
         )
         return 1
 
+    # Keeping try-except so that server does not break when encounter error.
     try:
         # The connection context commits on success and closes the connection.
         with psycopg.connect(DATABASE_URL) as connection:
@@ -61,6 +63,6 @@ def main() -> int:
         )
         return 1
 
-
+# Raise is used to exit gracefully and it helps mainly in the CI/CD piplelines to get that has the server exited successfully (statuhzscode= 0) or the server has exited with some error (statuscode = 1)
 if __name__ == "__main__":
     raise SystemExit(main())
