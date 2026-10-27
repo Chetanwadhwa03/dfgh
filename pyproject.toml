@@ -1,0 +1,10 @@
+[project]
+name = "elexon-wind-db"
+version = "0.1.0"
+description = "Minimal database setup for the Elexon wind forecast accuracy assignment"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.2,<4.0",
+    "python-dotenv>=1.0,<2.0",
+]
