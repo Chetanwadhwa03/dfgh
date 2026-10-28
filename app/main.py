@@ -100,7 +100,12 @@ def fetch_elexon_records(client, url, params):
         detail="Elexon returned an unexpected response format.",
     )
 
-
+# Validating and cleaning the data obtained from the FUELHH api endpoint as the actuals record.
+# Rules for cleaning :
+# 1. 
+# 2. FuelType we are picking here just for the wind.
+# 3. start_time should be in between janurary 1st to 31st ( because that is what we have to observe)
+# 4. If any clumsy data appears in which any of the time or the settlement period does not match the data it expects we will be skipping that record.
 def prepare_actuals(records):
     rows = []
     skipped = 0
@@ -151,6 +156,7 @@ def prepare_actuals(records):
             )
         )
 
+    # It returns the tuple containing these 2 values and python can unpack them on the left hand side to the 2 variables from them.
     return rows, skipped
 
 
@@ -186,6 +192,7 @@ def prepare_forecasts(records):
 # API used for fetching the records from the elexon API and upserts the respected tables in the DB for it and also it maintains the logic for the sync cool down period and for the sync_table if the application is scaled in future and multiple workers are doing this same operation to update the sync time it will handle it and it will give the required error with 429 status code.
 
 @app.post("/api/sync")
+
 def sync_data():
     try:
         with get_connection() as connection:
@@ -261,6 +268,7 @@ def sync_data():
                         },
                     )
 
+                # Prepare the data that we got from elexon to feed it in to the postgreSQL DB.
                 actual_rows, actuals_skipped = prepare_actuals(
                     actual_records
                 )
@@ -271,12 +279,15 @@ def sync_data():
                 if not actual_rows or not forecast_rows:
                     raise HTTPException(
                         status_code=502,
+
+                        # detail with the parentheses is used to write multiline statements without need to introduce new line in to it.
                         detail=(
                             "Elexon returned no usable January actual or "
                             "forecast records. No data was saved."
                         ),
                     )
 
+                # Upserting the data in to the DB making sure it follows the uniqueness you setted on the columns of (start_time , publish_time)
                 cursor.executemany(
                     """
                     INSERT INTO actual_generation (
@@ -296,6 +307,7 @@ def sync_data():
                     actual_rows,
                 )
 
+                # upserting the wind_forecasts table.
                 cursor.executemany(
                     """
                     INSERT INTO wind_forecasts (
@@ -311,6 +323,8 @@ def sync_data():
                     forecast_rows,
                 )
 
+
+                # After the upsertion, obviously we will update the sync_control table in the DB so that it has the latest value.
                 completed_at = datetime.now(timezone.utc)
                 next_allowed = completed_at + SYNC_COOLDOWN
 
