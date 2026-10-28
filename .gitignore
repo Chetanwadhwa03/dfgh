@@ -1,13 +1,14 @@
 # Python backend
-backend/.venv/
-backend/**/__pycache__/
+elexon-wind-backend/.venv/
+elexon-wind-backend/**/__pycache__/
 *.py[cod]
 
 # Backend environment variables
-backend/.env
-backend/.env.*
-!backend/.env.example
-!backend/.env.local.example
+elexon-wind-backend/.env
+elexon-wind-backend/.env.*
+elexon-wind-backend/.env.docker
+!elexon-wind-backend/.env.example
+!elexon-wind-backend/.env.local.example
 
 # Frontend dependencies and build output
 frontend/node_modules/
