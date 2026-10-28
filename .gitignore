@@ -1,7 +1,24 @@
-.venv/
-__pycache__/
+# Python backend
+backend/.venv/
+backend/**/__pycache__/
 *.py[cod]
-.env
-.env.*
-!.env.example
-README.md
+
+# Backend environment variables
+backend/.env
+backend/.env.*
+!backend/.env.example
+!backend/.env.local.example
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Frontend environment variables
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Editor and operating system files
+.vscode/
+.DS_Store
+Thumbs.db
