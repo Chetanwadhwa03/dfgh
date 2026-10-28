@@ -9,6 +9,7 @@ import httpx
 import psycopg
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import math
 
 from app.database import get_connection
 
@@ -192,7 +193,6 @@ def prepare_forecasts(records):
 # API used for fetching the records from the elexon API and upserts the respected tables in the DB for it and also it maintains the logic for the sync cool down period and for the sync_table if the application is scaled in future and multiple workers are doing this same operation to update the sync time it will handle it and it will give the required error with 429 status code.
 
 @app.post("/api/sync")
-
 def sync_data():
     try:
         with get_connection() as connection:
@@ -443,4 +443,169 @@ def get_forecast(
         "decisionCutoff": format_timestamp(decision_cutoff),
         "publishTime": format_timestamp(forecast["publish_time"]),
         "generationMW": float(forecast["generation_mw"]),
+    }
+
+# The endpoint to calculate the possible errors for the accuracy.
+@app.get("/accuracy")
+def get_accuracy(
+    from_date: date = Query(..., alias="from"),
+    to_date: date = Query(..., alias="to"),
+):
+    # Validate the requested date range.
+    if from_date > to_date:
+        raise HTTPException(
+            status_code=400,
+            detail="'from' must be earlier than or equal to 'to'.",
+        )
+
+    # Only January 2026 has been synced for this assignment.
+    if (
+        from_date < date(2026, 1, 1)
+        or to_date > date(2026, 1, 31)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="This endpoint currently supports January 2026 only.",
+        )
+
+    start_datetime = datetime(
+        from_date.year,
+        from_date.month,
+        from_date.day,
+        tzinfo=timezone.utc,
+    )
+
+    end_date_exclusive = to_date + timedelta(days=1)
+
+    end_datetime = datetime(
+        end_date_exclusive.year,
+        end_date_exclusive.month,
+        end_date_exclusive.day,
+        tzinfo=timezone.utc,
+    )
+
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                # Get eligible forecasts, newest eligible version first.
+                cursor.execute(
+                    """
+                    SELECT start_time, publish_time, generation_mw
+                    FROM wind_forecasts
+                    WHERE start_time >= %s
+                      AND start_time < %s
+                      AND publish_time <= start_time - INTERVAL '24 hours'
+                    ORDER BY start_time ASC, publish_time DESC
+                    """,
+                    (start_datetime, end_datetime),
+                )
+
+                forecast_records = cursor.fetchall()
+
+                # Get actual generation, newest published version first.
+                cursor.execute(
+                    """
+                    SELECT start_time, publish_time, generation_mw
+                    FROM actual_generation
+                    WHERE start_time >= %s
+                      AND start_time < %s
+                    ORDER BY start_time ASC, publish_time DESC
+                    """,
+                    (start_datetime, end_datetime),
+                )
+
+                actual_records = cursor.fetchall()
+
+    except (psycopg.Error, RuntimeError):
+        logger.exception("Could not retrieve data for accuracy calculation.")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read forecast or actual data.",
+        )
+
+    # Keep only the latest eligible forecast for each delivery hour.
+    selected_forecasts = {}
+
+    for record in forecast_records:
+        start_time = record["start_time"]
+
+        if start_time not in selected_forecasts:
+            selected_forecasts[start_time] = float(
+                record["generation_mw"]
+            )
+
+    if not selected_forecasts:
+        raise HTTPException(
+            status_code=404,
+            detail="No forecasts satisfy the 24-hour decision rule.",
+        )
+
+    # Keep the latest published actual for each half-hourly interval.
+    actual_by_start_time = {}
+
+    for record in actual_records:
+        start_time = record["start_time"]
+
+        if start_time not in actual_by_start_time:
+            actual_by_start_time[start_time] = float(
+                record["generation_mw"]
+            )
+
+    errors = []
+    skipped_for_missing_actuals = 0
+
+    for start_time, forecast_mw in selected_forecasts.items():
+        first_half_hour = actual_by_start_time.get(start_time)
+
+        second_half_hour = actual_by_start_time.get(
+            start_time + timedelta(minutes=30)
+        )
+
+        # Both half-hourly actual readings are required.
+        if first_half_hour is None or second_half_hour is None:
+            skipped_for_missing_actuals += 1
+            continue
+
+        # Convert the two half-hourly actual readings to an hourly average.
+        actual_mw = (first_half_hour + second_half_hour) / 2
+
+        # Positive error means overforecasting.
+        error = forecast_mw - actual_mw
+        errors.append(error)
+
+    if not errors:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No intervals have both an eligible forecast and "
+                "the two required half-hourly actual readings."
+            ),
+        )
+
+    interval_count = len(errors)
+
+    mae = sum(abs(error) for error in errors) / interval_count
+
+    rmse = math.sqrt(
+        sum(error ** 2 for error in errors) / interval_count
+    )
+
+    bias = sum(errors) / interval_count
+
+    return {
+        "period": {
+            "from": from_date.isoformat(),
+            "to": to_date.isoformat(),
+        },
+        "decisionRule": "publishTime <= startTime - 24 hours",
+        "metrics": {
+            "maeMW": round(mae, 2),
+            "rmseMW": round(rmse, 2),
+            "biasMW": round(bias, 2),
+        },
+        "intervals": {
+            "eligibleForecastIntervals": len(selected_forecasts),
+            "evaluatedIntervals": interval_count,
+            "skippedForMissingActuals": skipped_for_missing_actuals,
+        },
     }
