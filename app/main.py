@@ -451,14 +451,12 @@ def get_accuracy(
     from_date: date = Query(..., alias="from"),
     to_date: date = Query(..., alias="to"),
 ):
-    # Validate the requested date range.
     if from_date > to_date:
         raise HTTPException(
             status_code=400,
             detail="'from' must be earlier than or equal to 'to'.",
         )
 
-    # Only January 2026 has been synced for this assignment.
     if (
         from_date < date(2026, 1, 1)
         or to_date > date(2026, 1, 31)
@@ -487,7 +485,7 @@ def get_accuracy(
     try:
         with get_connection() as connection:
             with connection.cursor() as cursor:
-                # Get eligible forecasts, newest eligible version first.
+                # Select forecasts that satisfy the 24-hour rule.
                 cursor.execute(
                     """
                     SELECT start_time, publish_time, generation_mw
@@ -502,7 +500,7 @@ def get_accuracy(
 
                 forecast_records = cursor.fetchall()
 
-                # Get actual generation, newest published version first.
+                # Get actual readings, newest publication first.
                 cursor.execute(
                     """
                     SELECT start_time, publish_time, generation_mw
@@ -523,7 +521,7 @@ def get_accuracy(
             detail="Could not read forecast or actual data.",
         )
 
-    # Keep only the latest eligible forecast for each delivery hour.
+    # Keep the latest eligible forecast for each delivery hour.
     selected_forecasts = {}
 
     for record in forecast_records:
@@ -554,6 +552,17 @@ def get_accuracy(
     errors = []
     skipped_for_missing_actuals = 0
 
+    # Create a daily bucket for every date in the requested range.
+    daily_error_totals = {}
+    current_day = from_date
+
+    while current_day <= to_date:
+        daily_error_totals[current_day.isoformat()] = {
+            "absoluteErrorTotal": 0.0,
+            "evaluatedIntervals": 0,
+        }
+        current_day += timedelta(days=1)
+
     for start_time, forecast_mw in selected_forecasts.items():
         first_half_hour = actual_by_start_time.get(start_time)
 
@@ -561,17 +570,21 @@ def get_accuracy(
             start_time + timedelta(minutes=30)
         )
 
-        # Both half-hourly actual readings are required.
         if first_half_hour is None or second_half_hour is None:
             skipped_for_missing_actuals += 1
             continue
 
-        # Convert the two half-hourly actual readings to an hourly average.
         actual_mw = (first_half_hour + second_half_hour) / 2
 
-        # Positive error means overforecasting.
+        # Positive means overforecasting; negative means underforecasting.
         error = forecast_mw - actual_mw
         errors.append(error)
+
+        # Add this interval's absolute error to its delivery date.
+        day_key = start_time.astimezone(timezone.utc).date().isoformat()
+
+        daily_error_totals[day_key]["absoluteErrorTotal"] += abs(error)
+        daily_error_totals[day_key]["evaluatedIntervals"] += 1
 
     if not errors:
         raise HTTPException(
@@ -592,6 +605,22 @@ def get_accuracy(
 
     bias = sum(errors) / interval_count
 
+    # Calculate a separate MAE for every requested delivery date.
+    daily_metrics = []
+
+    for day, totals in daily_error_totals.items():
+        count = totals["evaluatedIntervals"]
+
+        daily_metrics.append({
+            "date": day,
+            "maeMW": (
+                round(totals["absoluteErrorTotal"] / count, 2)
+                if count > 0
+                else None
+            ),
+            "evaluatedIntervals": count,
+        })
+
     return {
         "period": {
             "from": from_date.isoformat(),
@@ -608,4 +637,5 @@ def get_accuracy(
             "evaluatedIntervals": interval_count,
             "skippedForMissingActuals": skipped_for_missing_actuals,
         },
+        "dailyMetrics": daily_metrics,
     }
